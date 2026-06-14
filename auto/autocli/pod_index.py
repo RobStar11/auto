@@ -1,12 +1,11 @@
 """Persistent pod path index at ~/.auto/config/pod-index.yaml.
 
-Schema (version 2)::
+Schema::
 
-    version: 2
     short-name:
       app-code:
-        - customer-1/app-code
-        - customer-2/app-code
+        - project-1/app-code
+        - project-2/app-code
       portal:
         - portal
 
@@ -118,7 +117,6 @@ def add_entry(scoped_name: str) -> None:
     if scoped_name not in entries:
         entries.append(scoped_name)
     short_name_map[short] = entries
-    data["version"] = 2
     data["short-name"] = short_name_map
     save_index(data)
 
@@ -192,8 +190,8 @@ def rebuild(code_root: str) -> dict:
     Returns a summary dict::
 
         {
-            "index": {"version": 2, "short-name": {...}},
-            "added": ["portal", "customer-1/app-code"],
+            "index": {"short-name": {...}},
+            "added": ["portal", "project-1/app-code"],
             "kept":  [],
             "pruned": ["old-pod"],
         }
@@ -241,7 +239,7 @@ def rebuild(code_root: str) -> dict:
         bucket.append(scoped)
         new_short_name_map[short] = bucket
 
-    new_index = {"version": 2, "short-name": new_short_name_map}
+    new_index = {"short-name": new_short_name_map}
     save_index(new_index)
 
     found_set = set(found_scoped)
