@@ -444,14 +444,17 @@ def remove_pod(ctx, pod_name):  # pylint: disable=unused-argument
 
     # Offer optional directory deletion.
     if os.path.exists(host_path):
-        if click.confirm(
-            f"\nAlso delete the source directory '{host_path}'?", default=False
-        ):
-            import shutil
+        try:
+            if click.confirm(
+                f"\nAlso delete the source directory '{host_path}'?", default=False
+            ):
+                import shutil
 
-            shutil.rmtree(host_path)
-            rprint(f"  - Directory '{host_path}' deleted.")
-        else:
+                shutil.rmtree(host_path)
+                rprint(f"  - Directory '{host_path}' deleted.")
+            else:
+                rprint(f"  [dim]Directory '{host_path}' kept on disk.[/dim]")
+        except click.exceptions.Abort:
             rprint(f"  [dim]Directory '{host_path}' kept on disk.[/dim]")
 
 
