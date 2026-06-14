@@ -414,7 +414,7 @@ def add_pod(ctx, pod_name, url):  # pylint: disable=unused-argument
     utils.pull_repo(repo, CONFIG["code"], subdir=subdir)
 
     # Register in the pod index.
-    pod_index.add_entry(pod_name, host_path)
+    pod_index.add_entry(pod_name)
     rprint(f"  + [bright_cyan]{pod_name}[/] added to pod index.")
 
     # Write pod entry to local.yaml pods list.

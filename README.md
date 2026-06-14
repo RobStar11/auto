@@ -131,7 +131,7 @@ https: true
 The easiest way to add a pod is with `auto add`:
 
 ```bash
-auto add git@github.com:DevOcho/portal.git portal
+auto add portal git@github.com:DevOcho/portal.git
 ```
 
 This registers the pod in `local.yaml`, clones the repo into your code
@@ -153,9 +153,9 @@ subdirectories under your code root. Use a `subdir/name` format when adding
 a pod:
 
 ```bash
-auto add git@github.com:customer-1/app.git   customer-1/app
-auto add git@github.com:customer-1/config.git customer-1/config
-auto add git@github.com:customer-2/app.git   customer-2/app
+auto add customer-1/app    git@github.com:customer-1/app.git
+auto add customer-1/config git@github.com:customer-1/config.git
+auto add customer-2/app    git@github.com:customer-2/app.git
 ```
 
 This produces the following layout on disk:
@@ -340,7 +340,7 @@ The above example will rollback the database to the 0123 migration.
 This will build the local pod image, tag it, and upload it to the local
 repository.
 
-### `auto add <url> <name>`
+### `auto add <name> <url>`
 
 Register a new pod. Writes the entry to `local.yaml`, clones the repo into
 your code folder, and updates the pod index.
@@ -350,8 +350,8 @@ your code folder, and updates the pod index.
 root. The parent directory is created automatically if it does not exist.
 
 ```bash
-auto add git@github.com:DevOcho/portal.git portal
-auto add git@github.com:customer-1/app.git customer-1/app
+auto add portal         git@github.com:DevOcho/portal.git
+auto add customer-1/app git@github.com:customer-1/app.git
 ```
 
 ### `auto remove <name>`
