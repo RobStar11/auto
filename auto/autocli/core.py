@@ -11,6 +11,7 @@ from pathlib import Path
 import yaml
 from autocli import checks, https, registry, runner, services, utils
 from autocli.config import CONFIG
+from autocli.pod_paths import get_cluster_path, get_host_path, pod_identity
 from rich import print as rprint
 from rich.console import Console, Group
 from rich.live import Live
@@ -425,24 +426,28 @@ def stop_pod(pod) -> None:
 
     # If we get a dictionary we have to find the pod name from the repo name
     if isinstance(pod, dict):
-        pod_name = pod["repo"].split("/")[-1:][0].replace(".git", "")
+        pod = pod["repo"].split("/")[-1:][0].replace(".git", "")
     else:
-        pod_name = pod
+        pod = utils.resolve_pod(pod)
+
+    # Bare identity for kubectl/helm; full scoped name for path construction.
+    identity = pod_identity(pod)
+    pod_name = identity  # display name (matches k8s resource name)
 
     # Is the pod running?
-    if not utils.run_and_wait("""kubectl get pods""", check_result=pod_name):
+    if not utils.run_and_wait("""kubectl get pods""", check_result=identity):
         rprint(f"    -- {pod_name}[steel_blue] was not running")
         return
 
     # Attempt to load config to perform a clean stop
-    config_file_path = Path(code_dir) / pod_name / ".auto" / "config.yaml"
+    config_file_path = Path(get_host_path(pod, code_dir)) / ".auto" / "config.yaml"
 
     if not config_file_path.is_file():
         # Fallback for pods without local config
         rprint(
             f"    [yellow]Warning: Config not found for {pod_name}. Trying helm uninstall...[/]"
         )
-        utils.run_and_wait(f"helm uninstall {pod_name}")
+        utils.run_and_wait(f"helm uninstall {identity}")
         return
 
     with open(config_file_path, encoding="utf-8") as pod_yaml:
@@ -452,8 +457,8 @@ def stop_pod(pod) -> None:
     start_cmd = pod_config.get("command", "")
 
     if re.search("helm", start_cmd):
-        # Helm Uninstall
-        release_name = pod_config.get("name", pod_name)
+        # Helm Uninstall — release name uses bare identity, never subdir
+        release_name = pod_config.get("name", identity)
         command = f"helm uninstall {release_name}"
         utils.run_and_wait(command)
         rprint(f"    -- {pod_name} [steel_blue]stopped (Helm)[/]")
@@ -470,7 +475,7 @@ def stop_pod(pod) -> None:
         command = f"kubectl delete {args}".strip()
 
         # Execute in the pod directory so relative paths in args work
-        pod_folder = os.path.join(code_dir, pod_name)
+        pod_folder = get_host_path(pod, code_dir)
         utils.run_and_wait(command, cwd=pod_folder)
         rprint(f"    -- {pod_name} [steel_blue]stopped (Manifest)[/]")
 
@@ -479,7 +484,7 @@ def stop_pod(pod) -> None:
         rprint(
             f"    [red]Unknown start command '{start_cmd}'. Attempting helm uninstall...[/]"
         )
-        utils.run_and_wait(f"helm uninstall {pod_name}")
+        utils.run_and_wait(f"helm uninstall {identity}")
 
 
 def _recover_pvc_conflict(pod_name):
@@ -516,9 +521,16 @@ def _recover_pvc_conflict(pod_name):
     )
 
 
-def _build_install_command(pod_config, pod_name, code_dir):
-    """Helper to construct the installation command"""
-    release_name = pod_config.get("name", pod_name)
+def _build_install_command(pod_config, scoped_name, code_dir):
+    """Helper to construct the installation command.
+
+    *scoped_name* is the full pod name (``subdir/repo-name`` or flat).
+    The helm release name and kubectl resource names use ``pod_identity``
+    (bare name, no subdir) — NEVER use the subdir-prefixed name for helm
+    because a '/' is invalid in a helm release name.
+    """
+    identity = pod_identity(scoped_name)
+    release_name = pod_config.get("name", identity)
     is_helm = False
 
     base_cmd = pod_config.get("command", "")
@@ -529,7 +541,8 @@ def _build_install_command(pod_config, pod_name, code_dir):
     if re.search("helm", base_cmd):
         is_helm = True
         desc = pod_config.get("desc", "")
-        helm_path = f"{code_dir}/{pod_name}/.auto/helm"
+        # helm_path uses the host path (WITH subdir if scoped)
+        helm_path = os.path.join(get_host_path(scoped_name, code_dir), ".auto", "helm")
 
         # Construct helm command
         command = f'{base_cmd} {cmd_args} --description "{desc}" {release_name} {helm_path}'.strip()
@@ -574,17 +587,21 @@ def start_pod(pod) -> None:
 
     # If we get a dictionary we have to find the pod name from the repo name
     if isinstance(pod, dict):
-        pod_name = pod["repo"].split("/")[-1:][0].replace(".git", "")
+        pod = pod["repo"].split("/")[-1:][0].replace(".git", "")
     else:
-        pod_name = pod
+        pod = utils.resolve_pod(pod)
+
+    # Bare identity for kubectl/helm; full scoped name for path construction.
+    identity = pod_identity(pod)
+    pod_name = identity  # display / k8s resource name
 
     # Is this pod already running?
-    if utils.run_and_wait("""kubectl get pods""", check_result=pod_name):
+    if utils.run_and_wait("""kubectl get pods""", check_result=identity):
         rprint(f"       * {pod_name}: [steel_blue]already running")
         return
 
     # If we aren't running let's start via helm install or kubectl apply
-    config_file_path = Path(code_dir) / pod_name / ".auto" / "config.yaml"
+    config_file_path = Path(get_host_path(pod, code_dir)) / ".auto" / "config.yaml"
 
     if not config_file_path.is_file():
         utils.declare_error(
@@ -596,12 +613,10 @@ def start_pod(pod) -> None:
     with open(config_file_path, encoding="utf-8") as pod_yaml:
         pod_config = yaml.safe_load(pod_yaml)
 
-    # Prepare execution directory (repo folder)
-    pod_folder = os.path.join(code_dir, pod_name)
+    # Prepare execution directory (repo folder — WITH subdir if scoped)
+    pod_folder = get_host_path(pod, code_dir)
 
-    command, is_helm, release_name = _build_install_command(
-        pod_config, pod_name, code_dir
-    )
+    command, is_helm, release_name = _build_install_command(pod_config, pod, code_dir)
 
     # Run the pod install command inside the repo directory
     _execute_pod_install(command, pod_folder, pod_name, is_helm, release_name)
@@ -826,9 +841,11 @@ def migrate_with_smalls(pod):
     Running because it depends on schema state — the migrator pod has its
     own lifecycle and exits when smalls.py finishes.
     """
+    pod = utils.resolve_pod(pod)
+    cluster_path = get_cluster_path(pod)
     return runner.run_one_shot_pod_command(
-        pod,
-        command_args=[f"/mnt/code/{pod}/smalls.py", "migrate"],
+        pod_identity(pod),
+        command_args=[f"{cluster_path}/smalls.py", "migrate"],
         action_label="migrate",
         # SMALLS_ENV=PROD disables smalls.py's interactive "continue?" prompt
         # on migration failure, which would hang in a non-TTY pod.
@@ -843,5 +860,6 @@ def rollback_with_smalls(pod, number):
     (click.confirm), which needs a TTY. Rollbacks are also rare and
     typically run against a known-healthy system.
     """
-    command = f"./smalls.py rollback {number}"
+    pod = utils.resolve_pod(pod)
+    command = f"smalls.py rollback {number}"
     utils.run_command_inside_pod(pod, command)

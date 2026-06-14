@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import yaml
 from autocli import runner
+from autocli.pod_paths import get_cluster_path
 
 
 def _fake_deployment(image="reg/api:1", env=None, volume_mounts=None, volumes=None):
@@ -248,3 +249,90 @@ def test_run_one_shot_pod_command_stops_on_interrupt(
 
     assert rc == 1
     assert mock_run_return.call_count == 1  # no post-stream phase polling
+
+
+# ---------------------------------------------------------------------------
+# Scoped pod path tests (Task 5.6)
+# ---------------------------------------------------------------------------
+
+
+def test_build_runner_pod_manifest_flat_working_dir():
+    """Flat pod workingDir defaults to /mnt/code/{name} (regression guard)."""
+    deployment = _fake_deployment()
+    # Remove the explicit workingDir so the default kicks in
+    deployment["spec"]["template"]["spec"]["containers"][0].pop("workingDir", None)
+
+    manifest = runner._build_runner_pod_manifest(
+        "api", "api-migrate-abc123", "migrate", ["x"], deployment, None, "default"
+    )
+    working_dir = manifest["spec"]["containers"][0]["workingDir"]
+    assert working_dir == "/mnt/code/api"
+
+
+def test_build_runner_pod_manifest_scoped_working_dir():
+    """Scoped pod workingDir defaults to /mnt/code/{subdir}/{name}."""
+    deployment = _fake_deployment()
+    deployment["spec"]["template"]["spec"]["containers"][0].pop("workingDir", None)
+
+    manifest = runner._build_runner_pod_manifest(
+        "customer-1/app-code",
+        "app-code-migrate-abc123",
+        "migrate",
+        ["x"],
+        deployment,
+        None,
+        "default",
+    )
+    working_dir = manifest["spec"]["containers"][0]["workingDir"]
+    assert working_dir == "/mnt/code/customer-1/app-code"
+
+
+def test_build_runner_pod_manifest_label_uses_bare_identity():
+    """auto.devocho/target label uses bare identity for scoped pods."""
+    deployment = _fake_deployment()
+
+    manifest = runner._build_runner_pod_manifest(
+        "customer-1/app-code",
+        "app-code-migrate-abc123",
+        "migrate",
+        ["x"],
+        deployment,
+        None,
+        "default",
+    )
+    target_label = manifest["metadata"]["labels"]["auto.devocho/target"]
+    assert target_label == "app-code"
+    assert "customer-1" not in target_label
+
+
+def test_build_runner_pod_manifest_flat_label_unchanged():
+    """Flat pod target label is the same as before (regression guard)."""
+    deployment = _fake_deployment()
+
+    manifest = runner._build_runner_pod_manifest(
+        "api", "api-migrate-abc123", "migrate", ["x"], deployment, None, "default"
+    )
+    assert manifest["metadata"]["labels"]["auto.devocho/target"] == "api"
+
+
+@patch("autocli.runner.run_and_return", return_value="Succeeded")
+@patch("autocli.runner.run_and_wait", return_value=1)
+@patch("autocli.runner.os.system", return_value=0)
+@patch("autocli.runner.subprocess.run")
+@patch("autocli.runner.get_deployment_spec")
+def test_run_one_shot_pod_command_scoped_uses_identity_for_deployment(
+    mock_get_dep, mock_subproc, _mock_system, _mock_run_wait, _mock_run_return
+):
+    """run_one_shot_pod_command looks up the deployment by bare identity for scoped pods."""
+    mock_get_dep.return_value = _fake_deployment()
+    apply_result = MagicMock(returncode=0, stderr="")
+    mock_subproc.side_effect = [apply_result]
+
+    runner.run_one_shot_pod_command(
+        "customer-1/app-code",
+        command_args=["/mnt/code/customer-1/app-code/smalls.py", "migrate"],
+        action_label="migrate",
+    )
+
+    # get_deployment_spec should be called with bare identity, not scoped name
+    mock_get_dep.assert_called_once_with("app-code", "default")

@@ -12,6 +12,7 @@ from time import sleep
 
 import yaml
 from autocli.config import CONFIG
+from autocli.pod_paths import get_host_path
 from rich import print as rprint
 from rich.table import Table
 from rich.text import Text
@@ -67,23 +68,32 @@ def ensure_host_known(git_url):
 
 
 def run_command_inside_pod(pod, command):
-    """Run a command inside a pod"""
+    """Run a command inside a pod.
+
+    *pod* is the scoped pod name (``subdir/repo-name`` or plain flat name).
+    Uses ``pod_identity(pod)`` for kubectl pod lookup (bare name, no subdir)
+    and ``get_cluster_path(pod)`` for the in-cluster working directory prefix.
+    """
+    from autocli.pod_paths import get_cluster_path, pod_identity as _pod_identity
+
+    identity = _pod_identity(pod)
 
     # Verify this pod is installed and running
-    pod_name = get_full_pod_name(pod)
+    pod_name = get_full_pod_name(identity)
     if not pod_name:
-        declare_error(f"[bright_cyan]{pod}[/bright_cyan] pod is not running")
+        declare_error(f"[bright_cyan]{identity}[/bright_cyan] pod is not running")
 
     # Get the pod config and the init command
     config = get_pod_config(pod)
 
     # Init the database
     if config:
-        command = f"kubectl exec -ti {pod_name} -- /mnt/code/{pod}/{command}"
+        cluster_path = get_cluster_path(pod)
+        command = f"kubectl exec -ti {pod_name} -- {cluster_path}/{command}"
         run_and_wait(command, capture_output=False)
 
     else:
-        declare_error(f"  !! {pod} could [red]NOT[/red] run command")
+        declare_error(f"  !! {identity} could [red]NOT[/red] run command")
 
 
 def declare_error(error_msg: str, exit_auto: bool = True) -> None:
@@ -290,13 +300,33 @@ def get_full_pod_name(pod, only_running=True) -> str:
     return pod_name.stdout.decode().strip("\n")
 
 
-def pull_repo(repo, code_folder):
-    """Pull a code repository to the code folder"""
+def pull_repo(repo, code_folder, subdir=""):
+    """Pull a code repository to the code folder.
 
-    # Determine where to put this repo based on the code_folder + git project name
-    repo_local_dir = (
-        code_folder + "/" + repo["repo"].split("/")[-1:][0].replace(".git", "")
-    )
+    *repo* is a dict with at least ``repo`` (git URL) and ``branch`` keys, or
+    a plain git URL string (in which case ``subdir`` and the URL are used).
+
+    *subdir* controls where inside ``code_folder`` the repo is cloned:
+      - ``""`` (default): ``code_folder/<bare_name>``  (backward-compatible)
+      - ``"customer-1"``:  ``code_folder/customer-1/<bare_name>``
+
+    The parent directory is created with ``mkdir -p`` semantics before cloning.
+    If the target directory already exists, the function falls back to
+    ``git pull`` (same behaviour as before for flat repos).
+    """
+    if isinstance(repo, str):
+        repo = {"repo": repo, "branch": "main"}
+
+    bare_name = repo["repo"].split("/")[-1:][0].replace(".git", "")
+
+    # Build the scoped name so get_host_path can compute the right directory.
+    scoped_name = f"{subdir}/{bare_name}" if subdir else bare_name
+    repo_local_dir = get_host_path(scoped_name, code_folder)
+
+    # For scoped clones, ensure the parent subdir exists.
+    if subdir:
+        parent_dir = os.path.dirname(repo_local_dir)
+        os.makedirs(parent_dir, exist_ok=True)
 
     # We need to capture the cwd so we can come back here
     cwd = os.getcwd()
@@ -321,8 +351,11 @@ def pull_repo(repo, code_folder):
 
     else:
         try:
-            # Repo isn't already present so we will need to clone it
-            os.chdir(code_folder)
+            # Repo isn't already present so we will need to clone it.
+            # Clone into the parent of repo_local_dir so the resulting
+            # directory name matches the repo name exactly.
+            clone_parent = os.path.dirname(repo_local_dir)
+            os.chdir(clone_parent)
             cmd = f"git clone {repo['repo']}"
             if not run_and_wait(cmd):
                 rprint(
@@ -353,8 +386,8 @@ def get_pod_config(pod):
     # Local Vars
     config = {}
 
-    # Read globally imported config
-    config_file = CONFIG["code"] + "/" + pod + "/.auto/config.yaml"
+    # Read globally imported config — use get_host_path to support scoped names
+    config_file = os.path.join(get_host_path(pod, CONFIG["code"]), ".auto", "config.yaml")
 
     # Does the config file exist?
     if not os.path.isfile(config_file):
@@ -389,7 +422,7 @@ def get_required_system_pods(config):
         if not pod_name:
             continue
 
-        config_file_path = os.path.join(code_dir, pod_name, ".auto", "config.yaml")
+        config_file_path = os.path.join(get_host_path(pod_name, code_dir), ".auto", "config.yaml")
         if os.path.isfile(config_file_path):
             try:
                 with open(config_file_path, encoding="utf-8") as pod_yaml:
@@ -542,6 +575,23 @@ def build_pod_table(namespace, all_namespaces):
         table.add_row(*row_data)
 
     return table
+
+
+def resolve_pod(pod: str) -> str:
+    """Resolve a possibly-partial pod name to a full scoped name.
+
+    Delegates to ``pod_index.resolve``. This is a thin wrapper so callers in
+    core/services/registry only need to import ``utils`` (not ``pod_index``
+    directly). Raises ``SystemExit`` after printing the error message when the
+    pod is not found in the index.
+    """
+    from autocli import pod_index  # lazy import to avoid circular deps
+
+    try:
+        return pod_index.resolve(pod)
+    except pod_index.NotFoundError as exc:
+        rprint(f"\n [red]:x: Error[/red]: {exc}")
+        raise SystemExit(1) from exc
 
 
 def get_pod_status(pod):

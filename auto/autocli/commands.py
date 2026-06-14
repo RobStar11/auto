@@ -8,8 +8,9 @@ import json
 import os
 
 import click
-from autocli import core, registry, services, utils
+from autocli import core, pod_index, registry, services, utils
 from autocli.config import CONFIG
+from autocli.pod_paths import parse_pod_name
 from rich import print as rprint
 from rich.progress import Progress
 
@@ -24,19 +25,30 @@ CONTEXT_SETTINGS = {
 
 
 def get_pod_names(ctx, param, incomplete):  # pylint: disable=unused-argument
-    """Generate list of pods for shell autocompletion"""
-    config_path = os.path.expanduser("~/.auto/config/local.yaml")
-    if not os.path.isfile(config_path):
-        return []
+    """Generate list of pods for shell autocompletion.
 
+    Merges scoped names from the pod index with bare names from CONFIG.
+    """
     try:
-        pods = []
+        names = set()
+
+        # 1. Bare names from local.yaml CONFIG (backward compat)
         for item in CONFIG.get("pods", []):
             if isinstance(item, dict) and "repo" in item:
                 p_name = item["repo"].split("/")[-1:][0].replace(".git", "")
-                if p_name.startswith(incomplete):
-                    pods.append(p_name)
-        return sorted(pods)
+                names.add(p_name)
+            elif isinstance(item, str):
+                names.add(item)
+
+        # 2. Scoped keys from the pod index (includes subdir/repo-name entries)
+        try:
+            idx_data = pod_index.load_index()
+            for scoped in idx_data.get("pods", {}):
+                names.add(scoped)
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+        return sorted(n for n in names if n.startswith(incomplete))
     except Exception:  # pylint: disable=broad-except
         return []
 
@@ -62,6 +74,37 @@ def auto():
     """Commandline utility to assist with creating/deleting clusters and
     starting/stopping pods."""
     return
+
+
+@auto.group()
+def index():
+    """Manage the pod path index (~/.auto/config/pod-index.yaml)."""
+
+
+@index.command(name="rebuild")
+@click.pass_context
+def index_rebuild(ctx):  # pylint: disable=unused-argument
+    """Rebuild the pod index by scanning the code root; prune dead entries."""
+    code_root = CONFIG["code"]
+    rprint(f"Rebuilding pod index from {code_root} ...")
+    result = pod_index.rebuild(code_root)
+
+    added = result.get("added", [])
+    kept = result.get("kept", [])
+    pruned = result.get("pruned", [])
+
+    for name in sorted(kept):
+        rprint(f"  + {name} (kept)")
+    for name in sorted(added):
+        rprint(f"  + {name} (added)")
+    for name in sorted(pruned):
+        rprint(f"  - {name} (pruned: directory missing)")
+
+    total = len(added) + len(kept)
+    rprint(
+        f"Index written: {total} pods "
+        f"({len(added)} added, {len(pruned)} pruned)."
+    )
 
 
 @auto.command(name="images")
@@ -311,3 +354,142 @@ def update(self, force):  # pylint: disable=unused-argument
         except Exception:  # pylint: disable=broad-except
             pass
     os.system("curl -fsSL https://www.devocho.com/auto.sh | bash")
+
+
+def _validate_pod_name(pod_name: str) -> tuple:
+    """Parse and validate a pod name; returns (subdir, name) on success.
+
+    Raises ``click.UsageError`` with a descriptive message on any of:
+      - more than one '/' (too many levels)
+      - empty segment (leading/trailing '/' or empty name)
+      - disallowed characters outside ``[a-zA-Z0-9_-]``
+    """
+    import re
+
+    subdir, name = parse_pod_name(pod_name)
+
+    # Reject 2+ levels: if name still contains a '/' after the first split
+    if "/" in name:
+        raise click.UsageError(
+            f"Pod name '{pod_name}' is invalid: only one level of nesting is "
+            "allowed (subdir/repo-name)."
+        )
+
+    segment_re = re.compile(r"^[a-zA-Z0-9_-]+$")
+    for segment in ([subdir, name] if subdir else [name]):
+        if not segment or not segment_re.match(segment):
+            raise click.UsageError(
+                f"Pod name '{pod_name}' is invalid: each segment must be "
+                "non-empty and contain only [a-zA-Z0-9_-]."
+            )
+
+    return subdir, name
+
+
+@auto.command(name="add")
+@click.argument("pod_name")
+@click.argument("url")
+@click.pass_context
+def add_pod(ctx, pod_name, url):  # pylint: disable=unused-argument
+    """Clone a git repo and register it in the pod index.
+
+    POD_NAME may be a flat name (myapp) or scoped name (subdir/myapp).
+    URL is the git repository URL to clone.
+    """
+    subdir, _ = _validate_pod_name(pod_name)
+
+    from autocli.pod_paths import get_host_path
+
+    host_path = get_host_path(pod_name, CONFIG["code"])
+
+    if os.path.exists(host_path):
+        utils.declare_error(
+            f"Directory '{host_path}' already exists. "
+            "Remove it first or choose a different name."
+        )
+        return
+
+    # Clone the repository with subdir context so the parent dir is created.
+    repo = {"repo": url, "branch": "main"}
+    utils.pull_repo(repo, CONFIG["code"], subdir=subdir)
+
+    # Register in the pod index.
+    pod_index.add_entry(pod_name, host_path)
+    rprint(f"  + [bright_cyan]{pod_name}[/] added to pod index.")
+
+    # Write pod entry to local.yaml pods list.
+    _add_pod_to_local_yaml(pod_name)
+
+
+@auto.command(name="remove")
+@click.argument("pod_name")
+@click.pass_context
+def remove_pod(ctx, pod_name):  # pylint: disable=unused-argument
+    """Remove a pod from the pod index (and optionally delete its directory).
+
+    POD_NAME may be a flat name or scoped name. Resolves via the pod index.
+    """
+    resolved = utils.resolve_pod(pod_name)
+
+    from autocli.pod_paths import get_host_path
+
+    host_path = get_host_path(resolved, CONFIG["code"])
+
+    # Remove from pod index.
+    pod_index.remove_entry(resolved)
+    rprint(f"  - [bright_cyan]{resolved}[/] removed from pod index.")
+
+    # Remove from local.yaml.
+    _remove_pod_from_local_yaml(resolved)
+
+    # Offer optional directory deletion.
+    if os.path.exists(host_path):
+        if click.confirm(
+            f"\nAlso delete the source directory '{host_path}'?", default=False
+        ):
+            import shutil
+
+            shutil.rmtree(host_path)
+            rprint(f"  - Directory '{host_path}' deleted.")
+        else:
+            rprint(f"  [dim]Directory '{host_path}' kept on disk.[/dim]")
+
+
+def _add_pod_to_local_yaml(pod_name: str) -> None:
+    """Append *pod_name* to the pods list in local.yaml (best-effort)."""
+    import yaml
+
+    local_yaml_path = os.path.expanduser("~/.auto/config/local.yaml")
+    if not os.path.isfile(local_yaml_path):
+        return
+    try:
+        with open(local_yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+        pods = data.get("pods", [])
+        if pod_name not in pods:
+            pods.append(pod_name)
+            data["pods"] = pods
+            with open(local_yaml_path, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(data, fh, default_flow_style=False)
+    except (OSError, Exception):  # pylint: disable=broad-except
+        pass
+
+
+def _remove_pod_from_local_yaml(pod_name: str) -> None:
+    """Remove *pod_name* from the pods list in local.yaml (best-effort)."""
+    import yaml
+
+    local_yaml_path = os.path.expanduser("~/.auto/config/local.yaml")
+    if not os.path.isfile(local_yaml_path):
+        return
+    try:
+        with open(local_yaml_path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+        pods = data.get("pods", [])
+        if pod_name in pods:
+            pods.remove(pod_name)
+            data["pods"] = pods
+            with open(local_yaml_path, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(data, fh, default_flow_style=False)
+    except (OSError, Exception):  # pylint: disable=broad-except
+        pass

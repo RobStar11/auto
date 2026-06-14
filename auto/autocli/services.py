@@ -8,6 +8,7 @@ from subprocess import CalledProcessError
 
 from autocli import runner, utils
 from autocli.config import CONFIG
+from autocli.pod_paths import get_cluster_path, pod_identity
 from rich import print as rprint
 
 
@@ -243,29 +244,44 @@ def connect_to_minio() -> None:
 
 
 def seed_pod(pod):
-    """Run the seed script in an ephemeral pod that mirrors the deployment"""
+    """Run the seed script in an ephemeral pod that mirrors the deployment.
+
+    The deployment lookup uses ``pod_identity`` (bare name, no subdir) because
+    k8s deployment names cannot contain '/'. The command_args use
+    ``get_cluster_path`` so that scoped pods resolve to the correct
+    ``/mnt/code/{subdir}/{name}/`` in-cluster path.
+    """
+    pod = utils.resolve_pod(pod)
     config = utils.get_pod_config(pod)
     seed_command = config["seed-command"]
+    cluster_path = get_cluster_path(pod)
+    identity = pod_identity(pod)
     rc = runner.run_one_shot_pod_command(
-        pod,
-        command_args=[f"/mnt/code/{pod}/{seed_command}"],
+        identity,
+        command_args=[f"{cluster_path}/{seed_command}"],
         action_label="seed",
     )
     if rc == 0:
-        rprint(f"  -- {pod} database seeded")
+        rprint(f"  -- {identity} database seeded")
 
 
 def init_pod_db(pod):
-    """Run the initdb script in an ephemeral pod that mirrors the deployment"""
+    """Run the initdb script in an ephemeral pod that mirrors the deployment.
+
+    Same identity vs. path distinction as ``seed_pod``.
+    """
+    pod = utils.resolve_pod(pod)
     config = utils.get_pod_config(pod)
     init_command = config["init-command"]
+    cluster_path = get_cluster_path(pod)
+    identity = pod_identity(pod)
     rc = runner.run_one_shot_pod_command(
-        pod,
-        command_args=[f"/mnt/code/{pod}/{init_command}"],
+        identity,
+        command_args=[f"{cluster_path}/{init_command}"],
         action_label="init",
     )
     if rc == 0:
-        rprint(f"  -- {pod} database initialized")
+        rprint(f"  -- {identity} database initialized")
 
 
 # --- Low-level database / object-store operations -------------------------

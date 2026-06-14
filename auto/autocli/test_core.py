@@ -64,7 +64,8 @@ def test_stop_pod_helm(mock_run, mock_is_file):
 
     with patch("builtins.open", mock_open(read_data=pod_config)):
         with patch.dict(CONFIG, {"code": "/tmp"}):
-            core.stop_pod("mypod")
+            with patch("autocli.utils.resolve_pod", return_value="mypod"):
+                core.stop_pod("mypod")
 
     found = False
     for call in mock_run.call_args_list:
@@ -89,7 +90,8 @@ def test_stop_pod_kubectl(mock_run, mock_is_file):
 
     with patch("builtins.open", mock_open(read_data=pod_config)):
         with patch.dict(CONFIG, {"code": "/tmp"}):
-            core.stop_pod("mypod")
+            with patch("autocli.utils.resolve_pod", return_value="mypod"):
+                core.stop_pod("mypod")
 
     found = False
     for call in mock_run.call_args_list:
@@ -329,7 +331,8 @@ def test_bootstrap_single_pod_dry_run(  # pylint: disable=too-many-arguments
 def test_migrate_uses_ephemeral_pod(mock_run):
     """migrate should run smalls.py in a one-shot pod, not via kubectl exec."""
     mock_run.return_value = 0
-    core.migrate_with_smalls("api")
+    with patch("autocli.utils.resolve_pod", return_value="api"):
+        core.migrate_with_smalls("api")
     mock_run.assert_called_once()
     kwargs = mock_run.call_args.kwargs
     args = mock_run.call_args.args
@@ -342,6 +345,128 @@ def test_migrate_uses_ephemeral_pod(mock_run):
 
 @patch("autocli.utils.run_command_inside_pod")
 def test_rollback_stays_on_kubectl_exec(mock_exec):
-    """rollback stays on kubectl exec because smalls.py prompts for confirmation."""
-    core.rollback_with_smalls("api", "0003")
-    mock_exec.assert_called_once_with("api", "./smalls.py rollback 0003")
+    """rollback stays on kubectl exec because smalls.py prompts for confirmation.
+
+    run_command_inside_pod prepends the cluster path, so the command arg here
+    is the relative script name only (no leading ./mnt/code prefix).
+    """
+    with patch("autocli.utils.resolve_pod", return_value="api"):
+        core.rollback_with_smalls("api", "0003")
+    mock_exec.assert_called_once_with("api", "smalls.py rollback 0003")
+
+
+# ---------------------------------------------------------------------------
+# Scoped pod path tests (Task 5.4)
+# ---------------------------------------------------------------------------
+
+
+@patch("pathlib.Path.is_file")
+@patch("autocli.utils.run_and_wait")
+def test_stop_pod_scoped_uses_host_path(mock_run, mock_is_file):
+    """stop_pod with a scoped name uses the subdir-aware host path for config."""
+    pod_config = """
+    command: helm install
+    name: app-code
+    """
+    mock_run.side_effect = [True, True]
+    mock_is_file.return_value = True
+
+    with patch("builtins.open", mock_open(read_data=pod_config)):
+        with patch.dict(CONFIG, {"code": "/code"}):
+            # Resolve is called inside stop_pod; mock it to return scoped name
+            with patch("autocli.utils.resolve_pod", return_value="customer-1/app-code"):
+                core.stop_pod("app-code")
+
+    # helm uninstall should use bare identity, not subdir-prefixed name
+    found_helm = False
+    for call in mock_run.call_args_list:
+        args, _ = call
+        cmd = args[0]
+        if "helm uninstall" in cmd:
+            assert "customer-1" not in cmd, "helm release must NOT contain subdir"
+            assert "app-code" in cmd
+            found_helm = True
+    assert found_helm
+
+
+@patch("pathlib.Path.is_file")
+@patch("autocli.utils.run_and_wait")
+def test_stop_pod_scoped_config_path_contains_subdir(mock_run, mock_is_file):
+    """stop_pod config_file_path includes the subdir for scoped pods."""
+    pod_config = """
+    command: helm install
+    name: myrelease
+    """
+    mock_run.return_value = True
+    mock_is_file.return_value = True
+
+    captured_paths = []
+
+    class _CapturingPath:
+        def __init__(self, *args):
+            self._path = "/".join(str(a) for a in args)
+        def __truediv__(self, other):
+            self._path = f"{self._path}/{other}"
+            return self
+        def is_file(self):
+            captured_paths.append(self._path)
+            return True
+
+    with patch("builtins.open", mock_open(read_data=pod_config)):
+        with patch.dict(CONFIG, {"code": "/code"}):
+            with patch("autocli.utils.resolve_pod", return_value="customer-1/app-code"):
+                with patch("autocli.core.Path", _CapturingPath):
+                    with patch("autocli.core.get_host_path", return_value="/code/customer-1/app-code") as mock_hp:
+                        core.stop_pod("app-code")
+    # get_host_path must have been called (it provides the dir to Path)
+    mock_hp.assert_called()
+
+
+@patch("pathlib.Path.is_file")
+@patch("autocli.utils.run_and_wait")
+def test_start_pod_flat_name_backward_compat(mock_run, mock_is_file):
+    """Flat pod start uses identical config path to pre-change behavior.
+
+    We verify get_host_path produces the right path for a flat pod without
+    subdir, ensuring backward compatibility.
+    """
+    from autocli.pod_paths import get_host_path
+
+    # get_host_path("myapp", "/code") must equal "/code/myapp" (byte-identical to old behavior)
+    assert get_host_path("myapp", "/code") == "/code/myapp"
+    assert get_host_path("myapp", "/code") == "/code" + "/" + "myapp"
+
+
+@patch("autocli.runner.run_one_shot_pod_command")
+def test_migrate_scoped_pod_uses_cluster_path(mock_run):
+    """migrate_with_smalls for a scoped pod passes the full cluster path."""
+    mock_run.return_value = 0
+    with patch("autocli.utils.resolve_pod", return_value="customer-1/app-code"):
+        core.migrate_with_smalls("app-code")
+
+    mock_run.assert_called_once()
+    args = mock_run.call_args.args
+    kwargs = mock_run.call_args.kwargs
+    # Deployment name should be bare identity
+    assert args[0] == "app-code"
+    # smalls.py path should include the subdir in cluster path
+    assert kwargs["command_args"] == ["/mnt/code/customer-1/app-code/smalls.py", "migrate"]
+
+
+@patch("autocli.runner.run_one_shot_pod_command")
+def test_migrate_flat_pod_cluster_path_unchanged(mock_run):
+    """Flat pod migrate produces byte-identical paths to pre-change behavior."""
+    mock_run.return_value = 0
+    with patch("autocli.utils.resolve_pod", return_value="api"):
+        core.migrate_with_smalls("api")
+
+    kwargs = mock_run.call_args.kwargs
+    assert kwargs["command_args"] == ["/mnt/code/api/smalls.py", "migrate"]
+
+
+@patch("autocli.utils.run_command_inside_pod")
+def test_rollback_scoped_pod(mock_exec):
+    """rollback_with_smalls with a scoped pod passes scoped name to run_command_inside_pod."""
+    with patch("autocli.utils.resolve_pod", return_value="customer-1/app-code"):
+        core.rollback_with_smalls("app-code", "0001")
+    mock_exec.assert_called_once_with("customer-1/app-code", "smalls.py rollback 0001")

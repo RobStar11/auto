@@ -16,6 +16,7 @@ from subprocess import CalledProcessError
 from time import sleep
 
 import yaml
+from autocli.pod_paths import get_cluster_path, pod_identity
 from autocli.utils import declare_error, run_and_return, run_and_wait
 from rich import print as rprint
 
@@ -52,6 +53,12 @@ def _build_runner_pod_manifest(
     if extra_env:
         env_list.extend(extra_env)
 
+    # pod_name may be scoped (subdir/repo-name). For k8s labels and
+    # deployment lookup we need the bare identity. For workingDir we need
+    # the cluster path.
+    identity = pod_identity(pod_name)
+    default_working_dir = get_cluster_path(pod_name)
+
     pod_spec = {
         "restartPolicy": "Never",
         "containers": [
@@ -59,7 +66,7 @@ def _build_runner_pod_manifest(
                 "name": action_label,
                 "image": container["image"],
                 "command": list(command_args),
-                "workingDir": container.get("workingDir", f"/mnt/code/{pod_name}"),
+                "workingDir": container.get("workingDir", default_working_dir),
                 "env": env_list,
                 "envFrom": container.get("envFrom", []),
                 "volumeMounts": container.get("volumeMounts", []),
@@ -81,7 +88,7 @@ def _build_runner_pod_manifest(
             "labels": {
                 "app.kubernetes.io/managed-by": "auto",
                 "auto.devocho/role": action_label,
-                "auto.devocho/target": pod_name,
+                "auto.devocho/target": identity,  # bare identity for k8s labels
             },
         },
         "spec": pod_spec,
@@ -193,16 +200,18 @@ def run_one_shot_pod_command(
 
     Returns 0 on Pod phase Succeeded, 1 otherwise.
     """
-    deployment = get_deployment_spec(pod_name, namespace)
+    # The deployment name in k8s is the bare identity (no subdir prefix).
+    identity = pod_identity(pod_name)
+    deployment = get_deployment_spec(identity, namespace)
     if not deployment:
         declare_error(
-            f"Deployment '{pod_name}' not found in namespace '{namespace}'. "
+            f"Deployment '{identity}' not found in namespace '{namespace}'. "
             f"Run 'auto start {pod_name}' first to install it."
         )
         return 1
 
     # Unique pod name so concurrent runs and old failed migrators don't collide
-    runner_name = f"{pod_name}-{action_label}-{uuid.uuid4().hex[:8]}"
+    runner_name = f"{identity}-{action_label}-{uuid.uuid4().hex[:8]}"
     runner_env = [{"name": "FORCE_COLOR", "value": "1"}, *(extra_env or [])]
     pod_manifest = _build_runner_pod_manifest(
         pod_name,
@@ -219,30 +228,30 @@ def run_one_shot_pod_command(
     )
 
     try:
-        rprint(f"  -- Spawning {action_label} pod for {pod_name}")
+        rprint(f"  -- Spawning {action_label} pod for {identity}")
         if not _create_runner_pod(manifest_yaml, runner_name, action_label, namespace):
             return 1
 
-        _wait_for_runner_start(phase_cmd, action_label, pod_name)
+        _wait_for_runner_start(phase_cmd, action_label, identity)
 
         # Stream logs until the container exits. os.system avoids buffering
         # so the user sees output in real time.
-        rprint(f"  -- Streaming {action_label} output for {pod_name}")
+        rprint(f"  -- Streaming {action_label} output for {identity}")
         log_status = os.system(f"kubectl logs -f pod/{runner_name} -n {namespace}")
 
         # If the user Ctrl-C'd the stream, don't wait for a terminal phase that
         # will never come.
         if _log_stream_interrupted(log_status):
-            rprint(f"  -- [yellow]{action_label} for {pod_name} interrupted[/yellow]")
+            rprint(f"  -- [yellow]{action_label} for {identity} interrupted[/yellow]")
             return 1
 
         phase = _wait_for_runner_finish(phase_cmd)
         if phase == "Succeeded":
-            rprint(f"  -- [green]{action_label} for {pod_name} completed[/green]")
+            rprint(f"  -- [green]{action_label} for {identity} completed[/green]")
             return 0
 
         rprint(
-            f"  -- [red]{action_label} for {pod_name} ended in phase "
+            f"  -- [red]{action_label} for {identity} ended in phase "
             f"{phase or 'unknown'}[/red]"
         )
         return 1

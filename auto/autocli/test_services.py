@@ -145,7 +145,8 @@ def test_process_pod_databases_skips_skipped_pods(mock_create_bucket):
 def test_init_pod_db_uses_ephemeral_pod(mock_get_config, mock_run):
     """init runs the configured init-command in a one-shot pod."""
     mock_get_config.return_value = {"init-command": "init_db.py"}
-    services.init_pod_db("api")
+    with patch("autocli.utils.resolve_pod", return_value="api"):
+        services.init_pod_db("api")
 
     mock_run.assert_called_once()
     kwargs = mock_run.call_args.kwargs
@@ -160,7 +161,8 @@ def test_init_pod_db_uses_ephemeral_pod(mock_get_config, mock_run):
 def test_seed_pod_uses_ephemeral_pod(mock_get_config, mock_run):
     """seed runs the configured seed-command in a one-shot pod."""
     mock_get_config.return_value = {"seed-command": "seed.py"}
-    services.seed_pod("api")
+    with patch("autocli.utils.resolve_pod", return_value="api"):
+        services.seed_pod("api")
 
     mock_run.assert_called_once()
     kwargs = mock_run.call_args.kwargs
@@ -168,3 +170,58 @@ def test_seed_pod_uses_ephemeral_pod(mock_get_config, mock_run):
     assert args[0] == "api"
     assert kwargs["command_args"] == ["/mnt/code/api/seed.py"]
     assert kwargs["action_label"] == "seed"
+
+
+# ---------------------------------------------------------------------------
+# Scoped pod path tests (Task 5.5)
+# ---------------------------------------------------------------------------
+
+
+@patch("autocli.runner.run_one_shot_pod_command", return_value=0)
+@patch("autocli.utils.get_pod_config")
+def test_seed_pod_scoped_uses_cluster_path(mock_get_config, mock_run):
+    """seed_pod for a scoped pod passes the cluster path and bare identity."""
+    mock_get_config.return_value = {"seed-command": "seed.py"}
+
+    with patch("autocli.utils.resolve_pod", return_value="customer-1/app-code"):
+        services.seed_pod("app-code")
+
+    mock_run.assert_called_once()
+    args = mock_run.call_args.args
+    kwargs = mock_run.call_args.kwargs
+    # Deployment target uses bare identity
+    assert args[0] == "app-code"
+    # command_args use the scoped cluster path
+    assert kwargs["command_args"] == ["/mnt/code/customer-1/app-code/seed.py"]
+    assert kwargs["action_label"] == "seed"
+
+
+@patch("autocli.runner.run_one_shot_pod_command", return_value=0)
+@patch("autocli.utils.get_pod_config")
+def test_init_pod_db_scoped_uses_cluster_path(mock_get_config, mock_run):
+    """init_pod_db for a scoped pod passes the cluster path and bare identity."""
+    mock_get_config.return_value = {"init-command": "init.py"}
+
+    with patch("autocli.utils.resolve_pod", return_value="customer-1/app-code"):
+        services.init_pod_db("app-code")
+
+    mock_run.assert_called_once()
+    args = mock_run.call_args.args
+    kwargs = mock_run.call_args.kwargs
+    assert args[0] == "app-code"
+    assert kwargs["command_args"] == ["/mnt/code/customer-1/app-code/init.py"]
+    assert kwargs["action_label"] == "init"
+
+
+@patch("autocli.runner.run_one_shot_pod_command", return_value=0)
+@patch("autocli.utils.get_pod_config")
+def test_seed_pod_flat_backward_compat(mock_get_config, mock_run):
+    """Flat pod seed produces byte-identical paths and identity to pre-change."""
+    mock_get_config.return_value = {"seed-command": "seed.py"}
+    with patch("autocli.utils.resolve_pod", return_value="api"):
+        services.seed_pod("api")
+
+    args = mock_run.call_args.args
+    kwargs = mock_run.call_args.kwargs
+    assert args[0] == "api"
+    assert kwargs["command_args"] == ["/mnt/code/api/seed.py"]

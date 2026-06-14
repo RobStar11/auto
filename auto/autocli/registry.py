@@ -8,6 +8,7 @@ import requests
 import yaml
 from autocli import utils
 from autocli.config import CONFIG, add_images_to_local_config
+from autocli.pod_paths import get_host_path, pod_identity
 from requests.exceptions import RequestException
 from rich import print as rprint
 
@@ -81,19 +82,22 @@ def _build_and_load_pods(loaded_repos):
         skip_version = False
 
         if isinstance(pod, dict):
-            pod_name = pod["repo"].split("/")[-1:][0].replace(".git", "")
+            scoped_name = pod["repo"].split("/")[-1:][0].replace(".git", "")
         else:
-            pod_name = pod
+            scoped_name = pod
 
-        if pod_name in loaded_repos:
+        # Registry tag check uses bare identity (no subdir in registry path)
+        identity = pod_identity(scoped_name)
+
+        if identity in loaded_repos:
             try:
-                url = f"http://k3d-registry.local:12345/v2/{pod_name}/tags/list"
+                url = f"http://k3d-registry.local:12345/v2/{identity}/tags/list"
                 req = requests.get(url, timeout=30)
                 req.raise_for_status()
                 image_info = req.json()
 
                 pod_config_path = os.path.join(
-                    CONFIG["code"], pod_name, ".auto", "config.yaml"
+                    get_host_path(scoped_name, CONFIG["code"]), ".auto", "config.yaml"
                 )
                 if os.path.isfile(pod_config_path):
                     with open(pod_config_path, encoding="utf-8") as pod_config_yaml:
@@ -109,7 +113,7 @@ def _build_and_load_pods(loaded_repos):
             if skip_version:
                 continue
 
-        tag_pod_docker_image(pod_name)
+        tag_pod_docker_image(scoped_name)
 
 
 def populate_registry():
@@ -294,36 +298,46 @@ def list_cluster_images():
 
 
 def tag_pod_docker_image(pod) -> None:
-    """Tag and push a new docker image to local registry"""
+    """Tag and push a new docker image to local registry.
+
+    *pod* is the scoped pod name (``subdir/repo-name`` or flat). The docker
+    build context is the host path (WITH subdir if scoped) but the image tag
+    and registry path use the bare identity ONLY. NEVER include the subdir in
+    the docker tag or registry URL — a '/' in an image name changes its
+    meaning (it becomes a registry prefix) and is invalid in a local tag.
+    """
+    pod = utils.resolve_pod(pod)
 
     # Local vars
     code_path = CONFIG["code"]
+    host = get_host_path(pod, code_path)  # build context WITH subdir
+    identity = pod_identity(pod)  # bare name for image tag / registry URL
 
     # We need to load the pod's config and see what version we are on
-    pod_config_path = os.path.join(code_path, pod, ".auto", "config.yaml")
+    pod_config_path = os.path.join(host, ".auto", "config.yaml")
     with open(pod_config_path, encoding="utf-8") as pod_config_yaml:
         pod_config = yaml.safe_load(pod_config_yaml)
     version = pod_config["version"]
 
-    rprint(f"  -- Building and Tagging: [bright_cyan]{pod} {version}")
+    rprint(f"  -- Building and Tagging: [bright_cyan]{identity} {version}")
 
     # Verify the pod is real using the users source code folder
-    if os.path.isdir(os.path.join(code_path, pod)):
-        rprint(f"     = Found pod {pod}")
+    if os.path.isdir(host):
+        rprint(f"     = Found pod {identity}")
 
-        # Perform docker build
-        rprint(f"     = Building [bright_cyan]{pod}[/] container")
-        command = f"docker build -t {pod}:{version} {code_path}/{pod}"
+        # Perform docker build — context is host path (with subdir), tag is bare identity
+        rprint(f"     = Building [bright_cyan]{identity}[/] container")
+        command = f"docker build -t {identity}:{version} {host}"
         utils.run_and_wait(command)
 
-        # Tag the image for the registry
-        rprint(f"     = Tagging [bright_cyan]{pod}[/] image for the registry")
-        command = f"docker tag {pod}:{version} k3d-registry.local:12345/{pod}:{version}"
+        # Tag the image for the registry — bare identity, no subdir in image name
+        rprint(f"     = Tagging [bright_cyan]{identity}[/] image for the registry")
+        command = f"docker tag {identity}:{version} k3d-registry.local:12345/{identity}:{version}"
         utils.run_and_wait(command)
 
         # Push the image to the registry
-        rprint(f"     = Pushing [bright_cyan]{pod}[/] image to the registry")
-        command = f"docker push k3d-registry.local:12345/{pod}:{version}"
+        rprint(f"     = Pushing [bright_cyan]{identity}[/] image to the registry")
+        command = f"docker push k3d-registry.local:12345/{identity}:{version}"
         utils.run_and_wait(command)
 
         # clean up your mess
@@ -334,4 +348,4 @@ def tag_pod_docker_image(pod) -> None:
     # They tried to build a pod that didn't exist.  Maybe a typo?
     else:
         print("")
-        rprint(f"[red bold]ERROR: Portal {pod} does not exist")
+        rprint(f"[red bold]ERROR: Portal {identity} does not exist")
