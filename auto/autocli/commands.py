@@ -418,7 +418,7 @@ def add_pod(ctx, pod_name, url):  # pylint: disable=unused-argument
     rprint(f"  + [bright_cyan]{pod_name}[/] added to pod index.")
 
     # Write pod entry to local.yaml pods list.
-    _add_pod_to_local_yaml(pod_name)
+    _add_pod_to_local_yaml(pod_name, url)
 
 
 @auto.command(name="remove")
@@ -455,8 +455,8 @@ def remove_pod(ctx, pod_name):  # pylint: disable=unused-argument
             rprint(f"  [dim]Directory '{host_path}' kept on disk.[/dim]")
 
 
-def _add_pod_to_local_yaml(pod_name: str) -> None:
-    """Append *pod_name* to the pods list in local.yaml (best-effort)."""
+def _add_pod_to_local_yaml(pod_name: str, url: str) -> None:
+    """Append a pod entry to the pods list in local.yaml (best-effort)."""
     import yaml
 
     local_yaml_path = os.path.expanduser("~/.auto/config/local.yaml")
@@ -466,8 +466,13 @@ def _add_pod_to_local_yaml(pod_name: str) -> None:
         with open(local_yaml_path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
         pods = data.get("pods", [])
-        if pod_name not in pods:
-            pods.append(pod_name)
+        already_registered = any(
+            (isinstance(p, dict) and p.get("name") == pod_name)
+            or (isinstance(p, str) and p == pod_name)
+            for p in pods
+        )
+        if not already_registered:
+            pods.append({"repo": url, "branch": "main", "name": pod_name})
             data["pods"] = pods
             with open(local_yaml_path, "w", encoding="utf-8") as fh:
                 yaml.safe_dump(data, fh, default_flow_style=False)
@@ -486,10 +491,15 @@ def _remove_pod_from_local_yaml(pod_name: str) -> None:
         with open(local_yaml_path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
         pods = data.get("pods", [])
-        if pod_name in pods:
-            pods.remove(pod_name)
-            data["pods"] = pods
-            with open(local_yaml_path, "w", encoding="utf-8") as fh:
-                yaml.safe_dump(data, fh, default_flow_style=False)
+        pods = [
+            p for p in pods
+            if not (
+                (isinstance(p, str) and p == pod_name)
+                or (isinstance(p, dict) and p.get("name") == pod_name)
+            )
+        ]
+        data["pods"] = pods
+        with open(local_yaml_path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(data, fh, default_flow_style=False)
     except (OSError, Exception):  # pylint: disable=broad-except
         pass

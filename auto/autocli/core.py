@@ -799,9 +799,14 @@ def pull_and_build_pods():
     # Pull each repo so we have it locally
     rprint(" -- pulling code repos")
     for pod in CONFIG["pods"]:
+        if isinstance(pod, str):
+            rprint(f"    ! Skipping malformed entry (re-add with 'auto add'): {pod}")
+            continue
+        pod_name = pod.get("name", "")
+        subdir = pod_name.split("/")[0] if "/" in pod_name else ""
         rprint(f"    = Pulling [bright_cyan]{pod['repo']}[/]")
         utils.ensure_host_known(pod["repo"])
-        utils.pull_repo(pod, code_folder)
+        utils.pull_repo(pod, code_folder, subdir=subdir)
 
     return CONFIG["pods"]
 
