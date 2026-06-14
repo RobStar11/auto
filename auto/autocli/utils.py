@@ -589,7 +589,7 @@ def resolve_pod(pod: str) -> str:
 
     try:
         return pod_index.resolve(pod)
-    except pod_index.NotFoundError as exc:
+    except (pod_index.NotFoundError, pod_index.CollisionError) as exc:
         rprint(f"\n [red]:x: Error[/red]: {exc}")
         raise SystemExit(1) from exc
 
