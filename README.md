@@ -128,16 +128,62 @@ https: true
 
 #### Adding Your Pods
 
-`auto` checks the `[pods]` section to see which pods you want to run in
-your local k3s cluster.  We assume each pod is in it's own separate git
-repository.
+The easiest way to add a pod is with `auto add`:
 
-Below is an example to show you how to setup a pod:
+```bash
+auto add git@github.com:DevOcho/portal.git portal
+```
+
+This registers the pod in `local.yaml`, clones the repo into your code
+folder, and updates the local pod index in one step.
+
+You can also add pods manually by editing `local.yaml`:
 
 ```yaml
 pods:
   - repo: git@github.com:DevOcho/portal.git
     branch: main
+    name: portal
+```
+
+#### Organizing pods in subdirectories
+
+If you work across multiple customers or projects you can group repos into
+subdirectories under your code root. Use a `subdir/name` format when adding
+a pod:
+
+```bash
+auto add git@github.com:customer-1/app.git   customer-1/app
+auto add git@github.com:customer-1/config.git customer-1/config
+auto add git@github.com:customer-2/app.git   customer-2/app
+```
+
+This produces the following layout on disk:
+
+```
+/home/you/Projects/
+├── customer-1/
+│   ├── app/
+│   └── config/
+└── customer-2/
+    └── app/
+```
+
+`auto` resolves the short name automatically — `auto start app` works as
+long as only one pod is named `app`. If two pods share the same short name,
+`auto` will ask you to be explicit: `auto start customer-1/app`.
+
+To remove a pod:
+
+```bash
+auto remove customer-1/app
+```
+
+If the local directory gets out of sync with the index (e.g. you cloned or
+deleted repos manually), rebuild it with:
+
+```bash
+auto index rebuild
 ```
 
 ### Setting up your application to run in `auto`
@@ -293,6 +339,40 @@ The above example will rollback the database to the 0123 migration.
 
 This will build the local pod image, tag it, and upload it to the local
 repository.
+
+### `auto add <url> <name>`
+
+Register a new pod. Writes the entry to `local.yaml`, clones the repo into
+your code folder, and updates the pod index.
+
+`<name>` can be a plain name (`portal`) or a subdirectory-prefixed name
+(`customer-1/portal`) to place the repo inside a subdirectory of your code
+root. The parent directory is created automatically if it does not exist.
+
+```bash
+auto add git@github.com:DevOcho/portal.git portal
+auto add git@github.com:customer-1/app.git customer-1/app
+```
+
+### `auto remove <name>`
+
+Remove a pod. Deletes the entry from `local.yaml` and from the pod index.
+Prompts before deleting the local directory from disk.
+
+```bash
+auto remove portal
+auto remove customer-1/app
+```
+
+### `auto index rebuild`
+
+Rebuild the pod index by scanning your code root one level deep. Use this
+if you cloned, deleted, or moved repos outside of `auto add`/`auto remove`.
+Entries whose directories no longer exist are pruned automatically.
+
+```bash
+auto index rebuild
+```
 
 ## Sharing the auto configs with your team
 
