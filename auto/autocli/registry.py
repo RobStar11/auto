@@ -82,7 +82,7 @@ def _build_and_load_pods(loaded_repos):
         skip_version = False
 
         if isinstance(pod, dict):
-            scoped_name = pod["repo"].split("/")[-1:][0].replace(".git", "")
+            scoped_name = pod.get("name") or pod["repo"].split("/")[-1:][0].replace(".git", "")
         else:
             scoped_name = pod
 
