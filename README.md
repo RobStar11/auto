@@ -148,35 +148,35 @@ pods:
 
 #### Organizing pods in subdirectories
 
-If you work across multiple customers or projects you can group repos into
+If you work across multiple projects or projects you can group repos into
 subdirectories under your code root. Use a `subdir/name` format when adding
 a pod:
 
 ```bash
-auto add customer-1/app    git@github.com:customer-1/app.git
-auto add customer-1/config git@github.com:customer-1/config.git
-auto add customer-2/app    git@github.com:customer-2/app.git
+auto add project-1/app    git@github.com:project-1/app.git
+auto add project-1/config git@github.com:project-1/config.git
+auto add project-2/app    git@github.com:project-2/app.git
 ```
 
 This produces the following layout on disk:
 
 ```
 /home/you/Projects/
-├── customer-1/
+├── project-1/
 │   ├── app/
 │   └── config/
-└── customer-2/
+└── project-2/
     └── app/
 ```
 
 `auto` resolves the short name automatically — `auto start app` works as
 long as only one pod is named `app`. If two pods share the same short name,
-`auto` will ask you to be explicit: `auto start customer-1/app`.
+`auto` will ask you to be explicit: `auto start project-1/app`.
 
 To remove a pod:
 
 ```bash
-auto remove customer-1/app
+auto remove project-1/app
 ```
 
 If the local directory gets out of sync with the index (e.g. you cloned or
@@ -346,12 +346,12 @@ Register a new pod. Writes the entry to `local.yaml`, clones the repo into
 your code folder, and updates the pod index.
 
 `<name>` can be a plain name (`portal`) or a subdirectory-prefixed name
-(`customer-1/portal`) to place the repo inside a subdirectory of your code
+(`project-1/portal`) to place the repo inside a subdirectory of your code
 root. The parent directory is created automatically if it does not exist.
 
 ```bash
 auto add portal         git@github.com:DevOcho/portal.git
-auto add customer-1/app git@github.com:customer-1/app.git
+auto add project-1/app git@github.com:project-1/app.git
 ```
 
 ### `auto remove <name>`
@@ -361,7 +361,7 @@ Prompts before deleting the local directory from disk.
 
 ```bash
 auto remove portal
-auto remove customer-1/app
+auto remove project-1/app
 ```
 
 ### `auto index rebuild`
